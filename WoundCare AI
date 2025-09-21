@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WoundCare AI App</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <style>
+        body { 
+            font-family: 'Sarabun', sans-serif; 
+            background: linear-gradient(135deg, #667be5, #754ca4); 
+            min-height: 100vh;
+        }
+        .card { transition: transform 0.3s ease, box-shadow 0.3s ease; }
+        .card:hover { transform: translateY(-5px); box-shadow: 0 10px 20px rgba(0,0,0,0.1); }
+        .icon-3d { transition: transform 0.5s ease; }
+        .icon-3d:hover { transform: rotateY(15deg) rotateX(15deg); }
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            background-color: rgba(0,0,0,0.4);
+            backdrop-filter: blur(5px);
+            -webkit-backdrop-filter: blur(5px);
+        }
+        .modal-content {
+            background-color: #ffffff;
+            margin: 5% auto;
+            padding: 24px;
+            border-radius: 12px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+            width: 90%;
+            max-width: 800px;
+            transform: scale(0.95);
+            transition: transform 0.3s ease-out;
+        }
+        .modal.active .modal-content { transform: scale(1); }
+        .loading-spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            border-left-color: #2563eb;
+            animation: spin 1s ease infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="flex flex-col">
+
+<!-- Firebase & Global Variables -->
+<script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore, doc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    // ตั้งค่า Firebase โดยใช้ Global Variables
+    const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+    const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+    const auth = getAuth(app);
+    let userId = null;
+    let isAuthReady = false;
+    let currentPatientId = null;
+
+    // ระบบ Authentication
+    onAuthStateChanged(auth, async (user) => {
+        if (user) {
+            userId = user.uid;
+        } else {
+            try {
+                if (initialAuthToken) {
+                    const userCredential = await signInWithCustomToken(auth, initialAuthToken);
+                    userId = userCredential.user.uid;
+                    isAuthReady = true;
+                } else {
+                    const userCredential = await signInAnonymously(auth);
+                    userId = userCredential.user.uid;
+                    isAuthReady = true;
+                }
+            } catch (error) {
+                console.error("Firebase Auth Error:", error);
+                userId = crypto.randomUUID();
+                isAuthReady = true;
+            }
+        }
+        console.log("Firebase initialized. User ID:", userId);
+        setupEventListeners();
+    });
+
+    // ฟังก์ชันสำหรับเปิด/ปิด Modal
+    function openModal(modalId) {
+        document.getElementById(modalId).style.display = 'block';
+        setTimeout(() => document.getElementById(modalId).classList.add('active'), 10);
+        
+        // เพิ่มข้อความต้อนรับสำหรับ chatbot
+        if (modalId === 'chatbot-modal') {
+            const chatWindow = document.getElementById('chat-window');
+            if (chatWindow) {
+                chatWindow.innerHTML = '';
+                const welcomeDiv = document.createElement('div');
+                welcomeDiv.className = 'bg-[#667eea] text-white p-3 rounded-xl max-w-[80%] self-start';
+                welcomeDiv.textContent = 'สวัสดีค่ะ! ฉันหมอมินน่า ผู้ช่วยดูแลแผลอัจฉริยะ พร้อมช่วยเหลือคุณ 24 ชั่วโมง 🩺';
+                chatWindow.appendChild(welcomeDiv);
+            }
+        }
+    }
+    function closeModal(modalId) {
+        const modal = document.getElementById(modalId);
+        if (modal) {
+            modal.classList.remove('active');
+            setTimeout(() => modal.style.display = 'none', 300);
+        }
+    }
+
+    // ฟังก์ชันสำหรับรีเซ็ตฟอร์ม
+    function resetForm() {
+        currentPatientId = null;
+        const form = document.getElementById('patient-management-form');
+        if (form) form.reset();
+        const imageList = document.getElementById('image-history-list');
+        if (imageList) imageList.innerHTML = `<p class="text-sm text-gray-500">ไม่พบประวัติภาพ</p>`;
+        const deleteBtn = document.getElementById('delete-patient-btn');
+        if (deleteBtn) deleteBtn.classList.add('hidden');
+    }
+
+    // ตั้งค่า Event Listeners ทั้งหมด
+    function setupEventListeners() {
+
+        // Tabbed navigation for backend
+        const tabs = ['tab-patient-management', 'tab-emr', 'tab-stats'];
+        const pages = ['page-patient-management', 'page-emr', 'page-stats'];
+
+        function activateTab(pageId, tabId) {
+            pages.forEach(id => {
+                const el = document.getElementById(id);
+                if(el) el.classList.add('hidden');
+            });
+            tabs.forEach(id => {
+                const el = document.getElementById(id);
+                if(el) {
+                    el.classList.remove('border-blue-500', 'text-blue-500');
+                    el.classList.add('border-transparent');
+                }
+            });
+            const pageEl = document.getElementById(pageId);
+            if(pageEl) pageEl.classList.remove('hidden');
+            const tabEl = document.getElementById(tabId);
+            if(tabEl) {
+                tabEl.classList.add('border-blue-500', 'text-blue-500');
+                tabEl.classList.remove('border-transparent');
+            }
+        }
+
+        // Main page event listeners
+        const chatbotBtn = document.getElementById('chatbot-btn');
+        if (chatbotBtn) chatbotBtn.addEventListener('click', () => openModal('chatbot-modal'));
+        const emrBtn = document.getElementById('emr-btn');
+        if (emrBtn) emrBtn.addEventListener('click', () => openModal('emr-modal'));
+        const aiAnalysisBtn = document.getElementById('ai-analysis-btn');
+        if (aiAnalysisBtn) aiAnalysisBtn.addEventListener('click', () => openModal('analysis-modal'));
+        const backendBtn = document.getElementById('backend-btn');
+        if (backendBtn) backendBtn.addEventListener('click', () => {
+            if (isAuthReady) {
+                document.getElementById('main-content-wrapper').classList.add('hidden');
+                document.getElementById('backend-section').classList.remove('hidden');
+                activateTab('page-patient-management', 'tab-patient-management');
+                setupBackendListeners();
+            } else {
+                openModal('backend-login-modal');
+            }
+        });
+        const mainHnSearchBtn = document.getElementById('main-hn-search-btn');
+        if (mainHnSearchBtn) mainHnSearchBtn.addEventListener('click', async () => {
+            const hn = document.getElementById('main-hn-input').value;
+            if (hn) {
+                document.getElementById('emr-hn-input').value = hn;
+                openModal('emr-modal');
+                document.getElementById('emr-search-btn').click();
+            }
+        });
+
+        // Backend login modal
+        const backendLoginBtn = document.getElementById('backend-login-btn');
+        if (backendLoginBtn) backendLoginBtn.addEventListener('click', () => checkBackendPassword());
+        const backendPasswordInput = document.getElementById('backend-password-input');
+        if (backendPasswordInput) backendPasswordInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') checkBackendPassword();
+        });
+        const backendLoginCloseBtn = document.getElementById('backend-login-close-btn');
+        if (backendLoginCloseBtn) backendLoginCloseBtn.addEventListener('click', () => closeModal('backend-login-modal'));
+
+        // Backend page
+        const backToMainBtn = document.getElementById('back-to-main-btn');
+        if (backToMainBtn) backToMainBtn.addEventListener('click', () => {
+            document.getElementById('backend-section').classList.add('hidden');
+            document.getElementById('main-content-wrapper').classList.remove('hidden');
+        });
+
+        // Modal close buttons
+        const chatbotCloseBtn = document.getElementById('chatbot-close-btn');
+        if (chatbotCloseBtn) chatbotCloseBtn.addEventListener('click', () => closeModal('chatbot-modal'));
+        const emrCloseBtn = document.getElementById('emr-close-btn');
+        if (emrCloseBtn) emrCloseBtn.addEventListener('click', () => closeModal('emr-modal'));
+        const analysisCloseBtn = document.getElementById('analysis-close-btn');
+        if (analysisCloseBtn) analysisCloseBtn.addEventListener('click', () => closeModal('analysis-modal'));
+
+        // Backend tabs
+        const tabPatientManagement = document.getElementById('tab-patient-management');
+        if (tabPatientManagement) tabPatientManagement.addEventListener('click', () => activateTab('page-patient-management', 'tab-patient-management'));
+        const tabEmr = document.getElementById('tab-emr');
+        if (tabEmr) tabEmr.addEventListener('click', () => {
+            activateTab('page-emr', 'tab-emr');
+            loadEmrPatientList();
+        });
+        const tabStats = document.getElementById('tab-stats');
+        if (tabStats) tabStats.addEventListener('click', () => activateTab('page-stats', 'tab-stats'));
+
+        // --------------- ฟังก์ชันสำหรับ AI Chatbot ---------------
+        const chatSendBtn = document.getElementById('chat-send-btn');
+        if (chatSendBtn) chatSendBtn.addEventListener('click', async () => {
+            const input = document.getElementById('chat-input').value;
+            if (!input.trim()) return;
+
+            const chatWindow = document.getElementById('chat-window');
+            const userMessageDiv = document.createElement('div');
+            userMessageDiv.className = 'bg-blue-600 text-white p-3 rounded-xl max-w-[80%] self-end ml-auto';
+            userMessageDiv.textContent = input;
+            chatWindow.appendChild(userMessageDiv);
+            chatWindow.scrollTop = chatWindow.scrollHeight;
+            document.getElementById('chat-input').value = '';
+
+            const thinkingDiv = document.createElement('div');
+            thinkingDiv.className = 'bg-gray-200 text-gray-700 p-3 rounded-xl max-w-[80%] self-start';
+            thinkingDiv.innerHTML = 'AI กำลังคิด...';
+            chatWindow.appendChild(thinkingDiv);
+            chatWindow.scrollTop = chatWindow.scrollHeight;
+
+            const apiKey = "";
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+            const payload = {
+                contents: [{ parts: [{ text: `ในฐานะผู้เชี่ยวชาญด้านการแพทย์ ให้คำปรึกษาเกี่ยวกับคำถามนี้: ${input}` }] }],
+                tools: [{ "google_search": {} }],
+                systemInstruction: { parts: [{ text: "คุณคือผู้ช่วย AI ทางการแพทย์ ที่ให้ข้อมูลอย่างแม่นยำและเป็นกลาง" }] }
+            };
+
+            try {
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const result = await response.json();
+                const text = result?.candidates?.[0]?.content?.parts?.[0]?.text || "ขออภัย ไม่สามารถให้คำตอบได้ในขณะนี้";
+                thinkingDiv.textContent = text;
+            } catch (error) {
+                thinkingDiv.textContent = "เกิดข้อผิดพลาดในการเชื่อมต่อ กรุณาลองใหม่อีกครั้ง";
+                console.error('API Error:', error);
+            }
+        });
+
+        // --------------- ฟังก์ชันสำหรับ EMR ---------------
+        const emrSearchBtn = document.getElementById('emr-search-btn');
+        if (emrSearchBtn) emrSearchBtn.addEventListener('click', async () => {
+            const hn = document.getElementById('emr-hn-input').value.trim();
+            if (!hn) return;
+
+            const loadingDiv = document.getElementById('emr-loading');
+            const detailsDiv = document.getElementById('emr-details');
+            const notFoundDiv = document.getElementById('emr-not-found');
+            detailsDiv.classList.add('hidden');
+            notFoundDiv.classList.add('hidden');
+            loadingDiv.classList.remove('hidden');
+
+            try {
+                const q = query(collection(db, `artifacts/${appId}/users/${userId}/patients`), where("hn", "==", hn));
+                const querySnapshot = await getDocs(q);
+                loadingDiv.classList.add('hidden');
+
+                if (!querySnapshot.empty) {
+                    const patientDoc = querySnapshot.docs[0].data();
+                    const patientInfo = document.getElementById('emr-patient-info');
+                    const historyList = document.getElementById('emr-history-list');
+                    const appointmentList = document.getElementById('emr-appointment-list');
+
+                    patientInfo.innerHTML = `
+                        <p><strong>ชื่อ-นามสกุล:</strong> ${patientDoc.name}</p>
+                        <p><strong>HN:</strong> ${patientDoc.hn}</p>
+                        <p><strong>วันที่เริ่มรักษา:</strong> ${patientDoc.startDate}</p>
+                    `;
+                    
+                    const history = JSON.parse(patientDoc.history || '[]');
+                    historyList.innerHTML = history.length > 0 ? history.map(h => `<li>วันที่ ${h.date}: ${h.note}</li>`).join('') : `<li>ยังไม่มีประวัติการส่งรูป</li>`;
+                    
+                    appointmentList.innerHTML = patientDoc.appointment ? `<li>${patientDoc.appointment}</li>` : `<li>ยังไม่มีการนัดหมาย</li>`;
+                    
+                    detailsDiv.classList.remove('hidden');
+                } else {
+                    notFoundDiv.classList.remove('hidden');
+                }
+            } catch (error) {
+                loadingDiv.classList.add('hidden');
+                console.error("Error fetching EMR data:", error);
+                notFoundDiv.textContent = "เกิดข้อผิดพลาดในการดึงข้อมูล";
+                notFoundDiv.classList.remove('hidden');
+            }
+        });
+
+        // --------------- ฟังก์ชันสำหรับ AI Analysis ---------------
+        const uploadBtn = document.getElementById('upload-btn');
+        if (uploadBtn) uploadBtn.addEventListener('click', async () => {
+            const fileInput = document.getElementById('wound-image-input');
+            if (!fileInput.files[0]) {
+                Swal.fire({
+                    title: 'ผิดพลาด!',
+                    text: 'กรุณาเลือกรูปภาพก่อน',
+                    icon: 'error'
+                });
+                return;
+            }
+
+            const file = fileInput.files[0];
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                const base64Image = e.target.result.split(',')[1];
+                const loadingDiv = document.getElementById('analysis-loading');
+                const resultsDiv = document.getElementById('analysis-results');
+                resultsDiv.classList.add('hidden');
+                loadingDiv.classList.remove('hidden');
+
+                const apiKey = "";
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+                const prompt = `จากภาพแผลนี้ โปรดวิเคราะห์ลักษณะแผลโดยละเอียดและให้คำแนะนำการรักษาที่เหมาะสมตามมาตรฐานทางการแพทย์ โดยระบุข้อมูลเป็น JSON object ดังนี้:
+                {
+                  "size": "ขนาดของแผล",
+                  "color": "ลักษณะสีของแผล",
+                  "depth": "ความลึกของแผล",
+                  "infection": "การติดเชื้อ (มี/ไม่มี)",
+                  "recommendation": "คำแนะนำการรักษาตามมาตรฐานทางการแพทย์"
+                }`;
+                const payload = {
+                    contents: [
+                        {
+                            role: "user",
+                            parts: [
+                                { text: prompt },
+                                {
+                                    inlineData: {
+                                        mimeType: file.type,
+                                        data: base64Image
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    generationConfig: {
+                        responseMimeType: "application/json",
+                        responseSchema: {
+                            type: "OBJECT",
+                            properties: {
+                                "size": { "type": "STRING" },
+                                "color": { "type": "STRING" },
+                                "depth": { "type": "STRING" },
+                                "infection": { "type": "STRING" },
+                                "recommendation": { "type": "STRING" }
+                            }
+                        }
+                    }
+                };
+
+                try {
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    const result = await response.json();
+                    const jsonText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+                    if (jsonText) {
+                        try {
+                            const analysis = JSON.parse(jsonText);
+                            document.getElementById('analysis-size').innerHTML = `<strong>📐 ขนาดแผล:</strong> ${analysis.size}`;
+                            document.getElementById('analysis-color').innerHTML = `<strong>🎨 ลักษณะสี:</strong> ${analysis.color}`;
+                            document.getElementById('analysis-depth').innerHTML = `<strong>📏 ความลึก:</strong> ${analysis.depth}`;
+                            document.getElementById('analysis-infection').innerHTML = `<strong>🦠 การติดเชื้อ:</strong> ${analysis.infection}`;
+                            document.getElementById('analysis-recommendation').textContent = analysis.recommendation;
+                            resultsDiv.classList.remove('hidden');
+                        } catch (jsonError) {
+                            console.error('JSON parsing error:', jsonError);
+                            Swal.fire({
+                                title: 'ผิดพลาด!',
+                                text: 'เกิดข้อผิดพลาดในการประมวลผลข้อมูล กรุณาลองใหม่อีกครั้ง',
+                                icon: 'error'
+                            });
+                        }
+                    } else {
+                        Swal.fire({
+                            title: 'ผิดพลาด!',
+                            text: 'ไม่สามารถวิเคราะห์รูปภาพได้ กรุณาลองใหม่',
+                            icon: 'error'
+                        });
+                    }
+                } catch (error) {
+                    console.error('API Error:', error);
+                    Swal.fire({
+                        title: 'ผิดพลาด!',
+                        text: 'เกิดข้อผิดพลาดในการเชื่อมต่อ กรุณาลองใหม่อีกครั้ง',
+                        icon: 'error'
+                    });
+                } finally {
+                    loadingDiv.classList.add('hidden');
+                }
+            };
+            reader.readAsDataURL(file);
+        });
+
+        // --------------- ฟังก์ชันสำหรับ Backend ---------------
+        
+        function setupBackendListeners() {
+            if (!isAuthReady || !userId) return;
+
+            // Backend Patient Management & EMR List Listener
+            const patientsRef = collection(db, `artifacts/${appId}/users/${userId}/patients`);
+            onSnapshot(patientsRef, (snapshot) => {
+                const listEl = document.getElementById('emr-patient-list');
+                if (listEl) {
+                    listEl.innerHTML = '';
+                    
+                    if (snapshot.empty) {
+                        listEl.innerHTML = `<p class="text-sm text-gray-500">ไม่พบข้อมูลผู้ป่วย</p>`;
+                    } else {
+                        snapshot.forEach(doc => {
+                            const patient = doc.data();
+                            const patientItem = document.createElement('div');
+                            patientItem.className = 'p-3 bg-white rounded-lg shadow-sm cursor-pointer hover:bg-gray-100';
+                            patientItem.textContent = `${patient.name} (HN: ${patient.hn})`;
+                            patientItem.dataset.id = doc.id;
+                            patientItem.addEventListener('click', () => displayPatientDetails(doc.id, patient));
+                            listEl.appendChild(patientItem);
+                        });
+                    }
+                }
+            });
+            
+            // Search filter for EMR
+            const emrSearchInput = document.getElementById('emr-search-input');
+            if (emrSearchInput) {
+                emrSearchInput.addEventListener('input', (e) => {
+                    const searchTerm = e.target.value.toLowerCase();
+                    const patientItems = document.querySelectorAll('#emr-patient-list > div');
+                    patientItems.forEach(item => {
+                        const text = item.textContent.toLowerCase();
+                        if (text.includes(searchTerm)) {
+                            item.style.display = '';
+                        } else {
+                            item.style.display = 'none';
+                        }
+                    });
+                });
+            }
+        }
+
+        async function displayPatientDetails(patientId, patientData) {
+            currentPatientId = patientId;
+            const dashboardEl = document.getElementById('emr-dashboard');
+            
+            // Populate EMR dashboard
+            if (dashboardEl) {
+                dashboardEl.innerHTML = `
+                    <div class="space-y-4">
+                        <h4 class="text-xl font-bold">ภาพรวม: ${patientData.name} (HN: ${patientData.hn})</h4>
+                        <div class="bg-blue-50 p-4 rounded-lg">
+                            <p><strong>อายุ:</strong> ${patientData.age || 'N/A'}</p>
+                            <p><strong>แพทย์เจ้าของไข้:</strong> ${patientData.doctor || 'N/A'}</p>
+                            <p><strong>วันที่เริ่มรักษา:</strong> ${patientData.startDate}</p>
+                            <p><strong>สถานะ:</strong> ${patientData.status || 'รักษาอยู่'}</p>
+                        </div>
+                        <h4 class="text-xl font-bold mt-6">ประวัติการรักษา</h4>
+                        <div class="bg-gray-100 p-4 rounded-lg">${patientData.history || 'ไม่มีประวัติการรักษา'}</div>
+
+                        <h4 class="text-xl font-bold mt-6">ประวัติแผลและภาพแผล</h4>
+                        <div id="emr-wound-history" class="space-y-4">
+                            ${(() => {
+                                const history = JSON.parse(patientData.imageHistory || '[]');
+                                if (history.length > 0) {
+                                    return history.map(item => `
+                                        <div class="bg-gray-100 p-4 rounded-lg">
+                                            <p class="font-bold">วันที่: ${item.date}</p>
+                                            <p>บันทึก: ${item.note}</p>
+                                            <img src="${item.imageUrl}" class="w-48 h-48 mt-2 rounded-lg object-cover">
+                                        </div>
+                                    `).join('');
+                                } else {
+                                    return `<p class="text-gray-500">ไม่พบประวัติภาพแผล</p>`;
+                                }
+                            })()}
+                        </div>
+
+                        <h4 class="text-xl font-bold mt-6">การนัดหมาย</h4>
+                        <div class="bg-yellow-50 p-4 rounded-lg">
+                            ${patientData.appointment ? `<p>${patientData.appointment}</p>` : `<p>ไม่มีการนัดหมาย</p>`}
+                        </div>
+                    </div>
+                `;
+            }
+            
+            // Also populate the Patient Management form
+            const formHn = document.getElementById('form-hn');
+            if (formHn) formHn.value = patientData.hn;
+            const formName = document.getElementById('form-name');
+            if (formName) formName.value = patientData.name;
+            const formAge = document.getElementById('form-age');
+            if (formAge) formAge.value = patientData.age || '';
+            const formStartDate = document.getElementById('form-start-date');
+            if (formStartDate) formStartDate.value = patientData.startDate;
+            const formDoctor = document.getElementById('form-doctor');
+            if (formDoctor) formDoctor.value = patientData.doctor || '';
+            const formHistory = document.getElementById('form-history');
+            if (formHistory) formHistory.value = patientData.history || '';
+            const deletePatientBtn = document.getElementById('delete-patient-btn');
+            if (deletePatientBtn) deletePatientBtn.classList.remove('hidden');
+
+            // Re-display image history for management tab
+            const imageHistoryListEl = document.getElementById('image-history-list');
+            if (imageHistoryListEl) {
+                imageHistoryListEl.innerHTML = '';
+                const history = JSON.parse(patientData.imageHistory || '[]');
+                if (history.length > 0) {
+                    history.forEach(item => {
+                        const historyItem = document.createElement('div');
+                        historyItem.className = 'bg-gray-200 p-2 rounded-lg';
+                        historyItem.innerHTML = `<p><strong>วันที่:</strong> ${item.date}</p><p><strong>บันทึก:</strong> ${item.note}</p><img src="${item.imageUrl}" class="w-24 h-24 mt-2 rounded-lg object-cover">`;
+                        imageHistoryListEl.appendChild(historyItem);
+                    });
+                } else {
+                    imageHistoryListEl.innerHTML = `<p class="text-sm text-gray-500">ไม่พบประวัติภาพ</p>`;
+                }
+            }
+        }
+        
+        const patientManagementForm = document.getElementById('patient-management-form');
+        if (patientManagementForm) patientManagementForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = {
+                hn: document.getElementById('form-hn').value,
+                name: document.getElementById('form-name').value,
+                age: document.getElementById('form-age').value,
+                startDate: document.getElementById('form-start-date').value,
+                doctor: document.getElementById('form-doctor').value,
+                history: document.getElementById('form-history').value,
+                imageHistory: "[]",
+                appointment: ""
+            };
+
+            const patientsRef = collection(db, `artifacts/${appId}/users/${userId}/patients`);
+            
+            if (currentPatientId) {
+                const patientDocRef = doc(patientsRef, currentPatientId);
+                await updateDoc(patientDocRef, formData);
+                Swal.fire('สำเร็จ!', 'แก้ไขข้อมูลผู้ป่วยเรียบร้อยแล้ว', 'success');
+            } else {
+                await addDoc(patientsRef, formData);
+                Swal.fire('สำเร็จ!', 'เพิ่มข้อมูลผู้ป่วยเรียบร้อยแล้ว', 'success');
+            }
+            resetForm();
+        });
+
+        const deletePatientBtn = document.getElementById('delete-patient-btn');
+        if (deletePatientBtn) deletePatientBtn.addEventListener('click', async () => {
+            if (currentPatientId) {
+                const result = await Swal.fire({
+                    title: 'คุณแน่ใจหรือไม่?',
+                    text: "ข้อมูลผู้ป่วยนี้จะถูกลบอย่างถาวร!",
+                    icon: 'warning',
+                    showCancelButton: true,
+                    confirmButtonColor: '#d33',
+                    cancelButtonColor: '#3085d6',
+                    confirmButtonText: 'ใช่, ลบเลย!'
+                });
+                if (result.isConfirmed) {
+                    const patientDocRef = doc(db, `artifacts/${appId}/users/${userId}/patients`, currentPatientId);
+                    await deleteDoc(patientDocRef);
+                    Swal.fire('ลบแล้ว!', 'ข้อมูลผู้ป่วยถูกลบเรียบร้อยแล้ว', 'success');
+                    resetForm();
+                }
+            }
+        });
+        
+        function checkBackendPassword() {
+            const passwordInput = document.getElementById('backend-password-input');
+            if (!passwordInput) return;
+            
+            if (passwordInput.value === 'mac2025') {
+                closeModal('backend-login-modal');
+                Swal.fire({
+                    title: 'สำเร็จ!',
+                    text: 'เข้าสู่ระบบหลังบ้านเรียบร้อยแล้ว',
+                    icon: 'success',
+                    timer: 2000,
+                    showConfirmButton: false
+                }).then(() => {
+                    isAuthReady = true;
+                    document.getElementById('main-content-wrapper').classList.add('hidden');
+                    document.getElementById('backend-section').classList.remove('hidden');
+                    activateTab('page-patient-management', 'tab-patient-management');
+                    setupBackendListeners();
+                });
+            } else {
+                Swal.fire({
+                    title: 'รหัสผ่านไม่ถูกต้อง',
+                    text: 'กรุณาลองใหม่อีกครั้ง',
+                    icon: 'error'
+                });
+                passwordInput.value = '';
+            }
+        }
+    }
+</script>
+
+<!-- Header -->
+<header class="bg-white shadow-sm py-4 px-6 md:px-12 flex justify-between items-center sticky top-0 z-50">
+    <div class="flex items-center space-x-4">
+        <!-- Logo and Title -->
+        <div class="flex items-center space-x-4">
+            <img id="logo-img" src="https://www.thiings.co/_next/image?url=https%3A%2F%2Flftz25oez4aqbxpq.public.blob.vercel-storage.com%2Fimage-04f0eoy9DeUzhiKzP4GuDz026f5nSm.png&w=1000&q=75" alt="WoundCare AI Logo" class="w-16 h-auto">
+            <div class="flex flex-col">
+                <span class="text-3xl font-bold text-gray-800">WoundCare AI</span>
+                <span class="text-sm text-gray-500">ระบบดูแลแผลอัจฉริยะ</span>
+            </div>
+        </div>
+    </div>
+    <div class="flex items-center space-x-4 md:space-x-8">
+        <div class="flex items-center space-x-2">
+            <input type="text" id="main-hn-input" placeholder="กรอกเลข HN" class="p-2 border rounded-full text-gray-700 w-32 md:w-48 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <button id="main-hn-search-btn" class="px-6 py-2 bg-green-500 text-white font-semibold rounded-full shadow hover:bg-green-600 transition-colors duration-200">ค้นหา</button>
+        </div>
+        <button id="backend-btn" class="px-6 py-2 bg-blue-600 text-white font-semibold rounded-full shadow hover:bg-blue-700 transition-colors duration-200">ระบบหลังบ้าน</button>
+    </div>
+</header>
+
+<!-- Main Content -->
+<main id="main-content-wrapper" class="container mx-auto p-4 md:p-8 flex-grow">
+    
+    <!-- Main Landing Section -->
+    <section id="main-section" class="flex flex-col items-center justify-center min-h-[calc(100vh-160px)] text-white">
+        <div class="text-center mb-12">
+            <h1 class="text-4xl md:text-5xl font-extrabold text-white text-center mb-4">ยินดีต้อนรับสู่ระบบดูแลแผลอัจฉริยะ</h1>
+            <p class="text-lg md:text-xl text-white">เทคโนโลยี AI ช่วยวิเคราะห์แผล เชื่อมต่อเวชระเบียนอิเล็กทรอนิกส์และให้คำแนะนำการรักษาที่แม่นยำ</p>
+        </div>
+        <h2 class="text-2xl font-bold text-white text-center mb-8">เครื่องมือดูแลแผล</h2>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 w-full max-w-5xl">
+            <!-- Chatbot Card -->
+            <div class="card bg-white p-6 rounded-2xl shadow-lg flex flex-col items-center text-center">
+                <span class="text-6xl mb-4">🤖</span>
+                <h3 class="text-xl font-bold text-gray-800">แชทบอท AI</h3>
+                <p class="text-sm text-gray-600 mt-2 text-center">ปรึกษาและถามคำถามเกี่ยวกับการดูแลแผลกับ AI ที่ฉลาด พร้อมให้คำแนะนำตลอด 24 ชั่วโมง</p>
+                <button id="chatbot-btn" class="mt-4 px-6 py-2 bg-[#667be5] text-white rounded-full shadow-lg hover:bg-blue-600 transition-colors flex items-center space-x-2">
+                    <i class="fas fa-comment-dots text-white"></i>
+                    <span>เริ่มต้นสนทนา</span>
+                </button>
+            </div>
+            <!-- Patient Data Card -->
+            <div class="card bg-white p-6 rounded-2xl shadow-lg flex flex-col items-center text-center">
+                <span class="text-6xl mb-4">📋</span>
+                <h3 class="text-xl font-bold text-gray-800">ข้อมูลผู้ป่วย</h3>
+                <p class="text-sm text-gray-600 mt-2 text-center">ค้นหาข้อมูลผู้ป่วยด้วยเลข HN เพื่อดู ชื่อ-นามสกุล ประวัติการรักษา และการนัดหมาย</p>
+                <button id="emr-btn" class="mt-4 px-6 py-2 bg-[#754ca4] text-white rounded-full shadow-lg hover:bg-purple-600 transition-colors flex items-center space-x-2">
+                    <i class="fas fa-search text-white"></i>
+                    <span>ค้นหาข้อมูล</span>
+                </button>
+            </div>
+            <!-- AI Analysis Card -->
+            <div class="card bg-white p-6 rounded-2xl shadow-lg flex flex-col items-center text-center">
+                <span class="text-6xl mb-4">🔬</span>
+                <h3 class="text-xl font-bold text-gray-800">AI วิเคราะห์แผล</h3>
+                <p class="text-sm text-gray-600 mt-2 text-center">อัปโหลดภาพแผลเพื่อให้ AI วิเคราะห์ขนาด ความลึก สี และการติดเชื้อ พร้อมแนะนำการรักษา</p>
+                <button id="ai-analysis-btn" class="mt-4 px-6 py-2 bg-[#667be5] text-white rounded-full shadow-lg hover:bg-blue-600 transition-colors flex items-center space-x-2">
+                    <i class="fas fa-microscope text-white"></i>
+                    <span>วิเคราะห์แผล</span>
+                </button>
+            </div>
+        </div>
+    </section>
+
+    <!-- Landing Page Section -->
+    <section id="features-section" class="mt-24 p-6 bg-white rounded-2xl shadow-lg">
+        <h2 class="text-3xl font-bold text-gray-800 text-center mb-8">คุณสมบัติเด่น</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+            <div class="p-6 bg-blue-50 rounded-xl flex flex-col items-center text-center">
+                <i class="fas fa-history text-4xl text-blue-600 mb-4"></i>
+                <h3 class="text-xl font-semibold text-gray-800">บันทึกย้อนหลัง</h3>
+                <p class="text-sm text-gray-600 mt-2">เก็บประวัติการเปลี่ยนแปลงแผลอย่างเป็นระบบ</p>
+            </div>
+            <div class="p-6 bg-blue-50 rounded-xl flex flex-col items-center text-center">
+                <i class="fas fa-link text-4xl text-blue-600 mb-4"></i>
+                <h3 class="text-xl font-semibold text-gray-800">เชื่อมต่อ EMR</h3>
+                <p class="text-sm text-gray-600 mt-2">เชื่อมต่อกับเวชระเบียนอิเล็กทรอนิกส์</p>
+            </div>
+            <div class="p-6 bg-blue-50 rounded-xl flex flex-col items-center text-center">
+                <i class="fas fa-bell text-4xl text-blue-600 mb-4"></i>
+                <h3 class="text-xl font-semibold text-gray-800">ระบบแจ้งเตือน</h3>
+                <p class="text-sm text-gray-600 mt-2">แจ้งเตือนการทำแผลและนัดพบแพทย์</p>
+            </div>
+            <div class="p-6 bg-blue-50 rounded-xl flex flex-col items-center text-center">
+                <i class="fas fa-brain text-4xl text-blue-600 mb-4"></i>
+                <h3 class="text-xl font-semibold text-gray-800">แม่นยำสูง</h3>
+                <p class="text-sm text-gray-600 mt-2">AI วิเคราะห์ตามมาตรฐานการแพทย์</p>
+            </div>
+        </div>
+    </section>
+</main>
+
+<!-- Footer -->
+<footer class="bg-gray-800 text-gray-300 py-6 mt-12">
+    <div class="container mx-auto px-4 text-center text-sm">
+        <p class="mb-2">© 2024 WoundCare AI พัฒนาโดย คณะพยาบาลศาสตร์แมคคอร์มิก | มหาวิทยาลัยพายัพ</p>
+        <div class="flex flex-wrap justify-center space-x-4 md:space-x-8">
+            <a href="#" class="hover:text-white transition-colors">ข้อเสนอแนะ</a>
+            <a href="#" class="hover:text-white transition-colors">นโยบายเว็บไซต์</a>
+            <a href="#" class="hover:text-white transition-colors">นโยบายการคุ้มครองข้อมูลส่วนบุคคล</a>
+            <a href="#" class="hover:text-white transition-colors">นโยบายการรักษาความมั่นคงปลอดภัยเว็บไซต์</a>
+        </div>
+    </div>
+</footer>
+
+<!-- Modals -->
+
+<!-- Chatbot Modal -->
+<div id="chatbot-modal" class="modal">
+    <div class="modal-content relative flex flex-col h-[80vh]">
+        <h2 class="text-xl font-bold mb-4">🤖 หมอมินน่า - ผู้ช่วยดูแลแผลอัจฉริยะ</h2>
+        <div id="chat-window" class="flex-grow overflow-y-auto p-4 border rounded-lg bg-gray-50 mb-4 space-y-4">
+        </div>
+        <div class="flex">
+            <textarea id="chat-input" class="flex-grow p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none" placeholder="พิมพ์ข้อความที่นี่..." rows="2"></textarea>
+            <button id="chat-send-btn" class="ml-2 px-6 py-2 bg-[#667eea] text-white rounded-lg hover:bg-blue-600 transition-colors">ส่ง</button>
+        </div>
+        <button id="chatbot-close-btn" class="absolute top-4 right-4 text-gray-500 hover:text-gray-800 text-xl font-bold">&times;</button>
+    </div>
+</div>
+
+<!-- EMR Modal -->
+<div id="emr-modal" class="modal">
+    <div class="modal-content relative flex flex-col">
+        <h2 class="text-xl font-bold mb-4">📄 เวชระเบียนอิเล็กทรอนิกส์</h2>
+        <div class="flex items-center mb-4">
+            <label for="emr-hn-input" class="font-semibold text-gray-700 mr-2">หมายเลข HN:</label>
+            <input type="text" id="emr-hn-input" class="flex-grow p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="กรอกหมายเลข HN">
+            <button id="emr-search-btn" class="ml-2 px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">ค้นหา</button>
+        </div>
+        <div id="emr-loading" class="flex justify-center items-center py-8 hidden">
+            <div class="loading-spinner"></div>
+        </div>
+        <div id="emr-details" class="p-4 border rounded-lg bg-gray-50 hidden">
+            <h3 class="text-lg font-bold text-gray-800 mb-2">ข้อมูลผู้ป่วย</h3>
+            <div id="emr-patient-info" class="mb-4"></div>
+            <h3 class="text-lg font-bold text-gray-800 mb-2">ประวัติการรักษา</h3>
+            <ul id="emr-history-list" class="list-disc list-inside space-y-1 text-gray-600"></ul>
+            <h3 class="text-lg font-bold text-gray-800 mb-2 mt-4">การนัดหมาย</h3>
+            <ul id="emr-appointment-list" class="list-disc list-inside space-y-1 text-gray-600"></ul>
+        </div>
+        <div id="emr-not-found" class="p-4 text-center text-red-500 hidden">ไม่พบข้อมูล HN ที่ระบุ</div>
+        <button id="emr-close-btn" class="absolute top-4 right-4 text-gray-500 hover:text-gray-800 text-xl font-bold">&times;</button>
+    </div>
+</div>
+
+<!-- AI Analysis Modal -->
+<div id="analysis-modal" class="modal">
+    <div class="modal-content relative flex flex-col">
+        <h2 class="text-xl font-bold mb-4">🔬 AI วิเคราะห์แผล</h2>
+        <div class="flex flex-col md:flex-row items-center justify-center space-y-4 md:space-y-0 md:space-x-4 mb-4">
+            <input type="file" id="wound-image-input" accept="image/*" class="w-full md:w-auto p-2 border rounded-lg">
+            <button id="upload-btn" class="w-full md:w-auto px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">อัปโหลดและวิเคราะห์</button>
+        </div>
+        <div id="analysis-loading" class="flex justify-center items-center py-8 hidden">
+            <div class="loading-spinner"></div>
+        </div>
+        <div id="analysis-results" class="p-4 border rounded-lg bg-gray-50 hidden">
+            <h3 class="text-lg font-bold text-gray-800 mb-2">📋 ผลการวิเคราะห์จาก AI</h3>
+            <p id="analysis-size" class="text-gray-700"><strong>ขนาดแผล:</strong></p>
+            <p id="analysis-color" class="text-gray-700"><strong>ลักษณะสี:</strong></p>
+            <p id="analysis-depth" class="text-gray-700"><strong>ความลึก:</strong></p>
+            <p id="analysis-infection" class="text-gray-700"><strong>การติดเชื้อ:</strong></p>
+            <h4 class="text-md font-bold text-gray-800 mt-4 mb-2">🩺 คำแนะนำการรักษา</h4>
+            <p id="analysis-recommendation" class="text-gray-600"></p>
+        </div>
+        <button id="analysis-close-btn" class="absolute top-4 right-4 text-gray-500 hover:text-gray-800 text-xl font-bold">&times;</button>
+    </div>
+</div>
+
+<!-- Backend Login Modal -->
+<div id="backend-login-modal" class="modal">
+    <div class="modal-content relative flex flex-col items-center p-8 text-center" style="max-width: 400px;">
+        <h2 class="text-2xl font-bold mb-4">เข้าสู่ระบบหลังบ้าน</h2>
+        <input type="password" id="backend-password-input" class="w-full p-3 border rounded-lg text-lg text-center focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="กรอกรหัสผ่าน">
+        <button id="backend-login-btn" class="mt-6 px-8 py-3 bg-blue-600 text-white font-semibold rounded-lg shadow-lg hover:bg-blue-700 transition-colors">เข้าสู่ระบบ</button>
+        <button id="backend-login-close-btn" class="absolute top-4 right-4 text-gray-500 hover:text-gray-800 text-xl font-bold">&times;</button>
+    </div>
+</div>
+
+<!-- Backend Section -->
+<section id="backend-section" class="min-h-screen p-4 md:p-8 hidden">
+    <div class="bg-white p-6 rounded-2xl shadow-lg w-full max-w-7xl mx-auto">
+        <div class="flex justify-between items-center mb-6">
+            <h2 class="text-3xl font-bold text-gray-800">ระบบหลังบ้าน</h2>
+            <button id="back-to-main-btn" class="px-6 py-2 bg-gray-200 text-gray-700 font-semibold rounded-full shadow hover:bg-gray-300 transition-colors duration-200">&lt; กลับหน้าหลัก</button>
+        </div>
+        <div class="flex space-x-4 border-b border-gray-200 mb-6">
+            <button id="tab-patient-management" class="py-2 px-4 text-lg font-semibold border-b-2 border-transparent hover:border-blue-500 transition-colors">
+                <span class="mr-2">➕</span> เพิ่ม/แก้ไขข้อมูลผู้ป่วย
+            </button>
+            <button id="tab-emr" class="py-2 px-4 text-lg font-semibold border-b-2 border-transparent hover:border-blue-500 transition-colors">
+                <span class="mr-2">📋</span> เวชระเบียน
+            </button>
+            <button id="tab-stats" class="py-2 px-4 text-lg font-semibold border-b-2 border-transparent hover:border-blue-500 transition-colors">
+                <span class="mr-2">📊</span> รายงานสถิติ
+            </button>
+        </div>
+
+        <!-- Page 1: Patient Management -->
+        <div id="page-patient-management" class="page-content hidden">
+            <h3 class="text-2xl font-bold mb-4">เพิ่ม/แก้ไขข้อมูลผู้ป่วย</h3>
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <form id="patient-management-form" class="space-y-4">
+                    <div>
+                        <label class="block text-gray-700">เลข HN</label>
+                        <input type="text" id="form-hn" class="w-full p-2 border rounded-lg" required>
+                    </div>
+                    <div>
+                        <label class="block text-gray-700">ชื่อ-นามสกุล</label>
+                        <input type="text" id="form-name" class="w-full p-2 border rounded-lg" required>
+                    </div>
+                    <div>
+                        <label class="block text-gray-700">อายุ</label>
+                        <input type="number" id="form-age" class="w-full p-2 border rounded-lg" required>
+                    </div>
+                    <div>
+                        <label class="block text-gray-700">วันที่เริ่มการรักษา</label>
+                        <input type="date" id="form-start-date" class="w-full p-2 border rounded-lg" required>
+                    </div>
+                    <div>
+                        <label class="block text-gray-700">แพทย์เจ้าของไข้</label>
+                        <input type="text" id="form-doctor" class="w-full p-2 border rounded-lg" required>
+                    </div>
+                    <div>
+                        <label class="block text-gray-700">ประวัติการรักษา</label>
+                        <textarea id="form-history" class="w-full p-2 border rounded-lg" rows="4"></textarea>
+                    </div>
+                    <div class="flex space-x-4">
+                        <button type="submit" id="save-patient-btn" class="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors">บันทึกข้อมูล</button>
+                        <button type="button" id="delete-patient-btn" class="px-6 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors hidden">ลบ</button>
+                    </div>
+                </form>
+                <div id="image-history-display" class="bg-gray-50 p-4 rounded-xl">
+                    <h4 class="text-lg font-bold mb-4">ประวัติภาพที่ส่งเข้ามา</h4>
+                    <div id="image-history-list" class="space-y-4">
+                        <p class="text-sm text-gray-500">ไม่พบประวัติภาพ</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Page 2: EMR -->
+        <div id="page-emr" class="page-content hidden">
+            <h3 class="text-2xl font-bold mb-4">เวชระเบียน</h3>
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <!-- Patient List Panel -->
+                <div class="lg:col-span-1 bg-gray-50 p-4 rounded-xl">
+                    <input type="text" id="emr-search-input" placeholder="ค้นหา HN หรือชื่อ" class="w-full p-2 border rounded-lg mb-4">
+                    <div id="emr-patient-list" class="space-y-2 overflow-y-auto max-h-96">
+                        <p class="text-sm text-gray-500">กำลังโหลด...</p>
+                    </div>
+                </div>
+                <!-- Patient Dashboard Panel -->
+                <div class="lg:col-span-2 bg-white p-4 rounded-xl shadow-inner">
+                    <div id="emr-dashboard">
+                        <p class="text-center text-gray-500">กรุณาเลือกผู้ป่วยจากรายการเพื่อดูข้อมูล</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Page 3: Statistics Report -->
+        <div id="page-stats" class="page-content hidden">
+            <h3 class="text-2xl font-bold mb-4">รายงานสถิติการเข้าใช้งานของผู้ป่วย</h3>
+            <p class="text-gray-600">หน้านี้จะแสดงข้อมูลเชิงสถิติ เช่น จำนวนผู้ป่วยทั้งหมด, การเข้าใช้งานระบบ, และสถิติการวิเคราะห์แผลด้วย AI</p>
+            <!-- Content will be added here -->
+        </div>
+
+    </div>
+</section>
+</body>
+</html>
